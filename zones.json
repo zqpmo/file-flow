@@ -1,0 +1,37 @@
+{
+  "zones_root": ".",
+  "sources": {
+    "downloads": "./data/downloads",
+    "desktop": "./data/desktop",
+    "inbox": "./data/inbox"
+  },
+  "dest_roots": {
+    "projects": "./data/projects",
+    "training": "./data/training",
+    "knowledge": "./data/knowledge",
+    "capture": "./data/capture",
+    "pending": "./data/pending",
+    "archive": "./data/archive",
+    "scratch": "./data/scratch",
+    "runs": "./runs"
+  },
+  "exempt_name_prefixes": [".", "~$", "NTUSER", "ntuser", "desktop.ini"],
+  "exempt_dirs": [
+    "AppData",
+    "Application Data",
+    "Cookies",
+    "Favorites",
+    "Links",
+    "Local Settings",
+    "My Documents",
+    "NetHood",
+    "PrintHood",
+    "Recent",
+    "Saved Games",
+    "Searches",
+    "SendTo",
+    "Start Menu",
+    "Templates"
+  ],
+  "home_root_max_depth": 0
+}

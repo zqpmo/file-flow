@@ -1,0 +1,9 @@
+runs/*/
+runs/latest-report.json
+state/
+secrets.env
+__pycache__/
+**/__pycache__/
+*.pyc
+data/
+.pytest_cache/

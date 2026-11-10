@@ -1,0 +1,73 @@
+[
+  {
+    "id": "keep-shortcuts",
+    "priority": 200,
+    "match": { "extensions": [".lnk"] },
+    "decision": "ignore",
+    "confidence": 1.0
+  },
+  {
+    "id": "office-lockfiles",
+    "priority": 100,
+    "match": { "name_prefixes": ["~$"] },
+    "decision": "ignore",
+    "confidence": 1.0
+  },
+  {
+    "id": "course-handbook",
+    "priority": 50,
+    "match": { "name_any": ["HANDBOOK", "handbook"], "extensions": [".md", ".pdf", ".json"] },
+    "destination": "knowledge",
+    "confidence": 0.9
+  },
+  {
+    "id": "training-deck",
+    "priority": 55,
+    "match": { "name_any": ["training", "onboarding", "workshop"], "extensions": [".pptx", ".docx", ".pdf"] },
+    "destination": "training",
+    "confidence": 0.88
+  },
+  {
+    "id": "project-docs",
+    "priority": 50,
+    "match": { "name_any": ["ProjectX", "project-x", "Acme"] },
+    "destination": "projects",
+    "confidence": 0.85
+  },
+  {
+    "id": "mail-json-dump",
+    "priority": 40,
+    "match": { "name_any": ["gmail_", "mail.json", "unread_now", "inbox.json"], "extensions": [".json", ".err", ".txt"] },
+    "destination": "capture",
+    "subfolder": "mail",
+    "confidence": 0.85
+  },
+  {
+    "id": "py-scratch",
+    "priority": 35,
+    "match": { "name_any": ["extract_", "classify_docs", "check_deps"], "extensions": [".py", ".err", ".txt"] },
+    "destination": "scratch",
+    "confidence": 0.8
+  },
+  {
+    "id": "backup-archive",
+    "priority": 70,
+    "match": { "name_any": ["backup-", "home-backup-"] },
+    "destination": "archive",
+    "confidence": 0.9
+  },
+  {
+    "id": "request-logs-csv",
+    "priority": 40,
+    "match": { "name_any": ["request-logs"], "extensions": [".csv"] },
+    "destination": "runs",
+    "confidence": 0.85
+  },
+  {
+    "id": "default-pending",
+    "priority": 0,
+    "match": {},
+    "destination": "pending",
+    "confidence": 0.3
+  }
+]
