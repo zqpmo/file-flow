@@ -111,6 +111,69 @@ class MoveJournalTests(unittest.TestCase):
         self.assertEqual(result["restored"], 1)
         self.assertTrue(f.exists())
 
+    def test_rollback_refuses_occupied_original_path(self):
+        f = self.src / "HANDBOOK_z.md"
+        f.write_text("orig", encoding="utf-8")
+        report = engine.run_once(
+            self.ff,
+            zones_path=self.zones_path,
+            rules_path=self.rules_path,
+            dry_run=False,
+            source_filter=None,
+            extra_sources=[str(self.src)],
+        )
+        self.assertEqual(report["moved"], 1)
+        # User creates a new file at the original path before rollback
+        f.write_text("newer", encoding="utf-8")
+        result = engine.rollback_run(self.ff, report["run_id"])
+        self.assertEqual(result["restored"], 0)
+        self.assertTrue(any(
+            s.get("reason") == "original_path_occupied" for s in result.get("skipped", [])
+        ))
+        # New file must not be overwritten
+        self.assertEqual(f.read_text(encoding="utf-8"), "newer")
+
+    def test_first_run_creates_state_dir(self):
+        # ff has no state/ pre-created beyond setUp — remove it to simulate first run
+        import shutil as _sh
+        state = self.ff / "state"
+        if state.exists():
+            _sh.rmtree(state)
+        f = self.src / "HANDBOOK_fresh.md"
+        f.write_text("fresh", encoding="utf-8")
+        report = engine.run_once(
+            self.ff,
+            zones_path=self.zones_path,
+            rules_path=self.rules_path,
+            dry_run=False,
+            source_filter=None,
+            extra_sources=[str(self.src)],
+        )
+        self.assertEqual(report["moved"], 1)
+        self.assertTrue((self.ff / "state" / "seen_hashes.json").exists())
+
+    def test_exempt_dirs_skipped(self):
+        exempt_root = self.src / "AppData"
+        exempt_root.mkdir(parents=True, exist_ok=True)
+        (exempt_root / "hidden.md").write_text("h", encoding="utf-8")
+        (self.src / "HANDBOOK_visible.md").write_text("v", encoding="utf-8")
+        zones = dict(self.zones)
+        zones["exempt_dirs"] = ["AppData"]
+        zones_path = self.ff / "zones2.json"
+        zones_path.write_text(json.dumps(zones, ensure_ascii=False), encoding="utf-8")
+        report = engine.run_once(
+            self.ff,
+            zones_path=zones_path,
+            rules_path=self.rules_path,
+            dry_run=False,
+            source_filter=None,
+            extra_sources=[str(self.src)],
+        )
+        # only visible handbook moves; AppData file stays
+        self.assertEqual(report["moved"], 1)
+        self.assertTrue((exempt_root / "hidden.md").exists())
+        self.assertFalse((self.src / "HANDBOOK_visible.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

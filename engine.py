@@ -71,13 +71,24 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _is_exempt(path: Path, zones: dict) -> bool:
+def _is_exempt(path: Path, zones: dict, root: Path | None = None) -> bool:
     name = path.name
     for p in zones.get("exempt_name_prefixes") or []:
         if name.startswith(p):
             return True
     if name.lower() == "desktop.ini":
         return True
+    # Skip exempt dir names only under the scan root (not absolute path ancestors
+    # like ...\AppData\Local\Temp\... which would wipe the whole tree).
+    exempt_dirs = set(zones.get("exempt_dirs") or [])
+    if exempt_dirs:
+        try:
+            rel_parts = path.resolve().relative_to(Path(root).resolve()).parts if root else path.parts
+        except ValueError:
+            rel_parts = path.parts
+        for part in rel_parts[:-1]:  # directories only, not the filename
+            if part in exempt_dirs:
+                return True
     return False
 
 
@@ -132,10 +143,13 @@ def run_once(
     run_id = (
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     )
+    # Ensure runtime dirs exist before any move or state write (first-run safety).
+    state_dir = ff_root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     run_dir = ff_root / "runs" / run_id
     journal_path = run_dir / "journal.ndjson"
     report_path = run_dir / "run-report.json"
-    state_path = ff_root / "state" / "seen_hashes.json"
+    state_path = state_dir / "seen_hashes.json"
     seen: dict = {}
     if state_path.exists():
         seen = json.loads(state_path.read_text(encoding="utf-8"))
@@ -148,7 +162,7 @@ def run_once(
     for zone_key, zone_path in _iter_sources(zones, source_filter, extra_sources):
         max_depth = 0 if zone_key == "home_root" else None
         for src in list(_iter_files(zone_path, max_depth)):
-            if _is_exempt(src, zones):
+            if _is_exempt(src, zones, root=zone_path):
                 ignored.append({"src": str(src), "reason": "exempt"})
                 continue
             try:
@@ -276,30 +290,56 @@ def rollback_run(ff_root: Path, run_id: str) -> dict:
     if not journal_path.exists():
         raise FileNotFoundError(journal_path)
     restored = 0
+    skipped: list[dict] = []
     text = journal_path.read_text(encoding="utf-8")
     lines = [json.loads(x) for x in text.splitlines() if x.strip()]
+    state_path = ff_root / "state" / "seen_hashes.json"
+    seen: dict = {}
+    if state_path.exists():
+        seen = json.loads(state_path.read_text(encoding="utf-8"))
     with open(journal_path, "a", encoding="utf-8") as jf:
         for rec in reversed(lines):
             if rec.get("action") not in ("move", "to_pending"):
                 continue
             dest, src = Path(rec["dest"]), Path(rec["src"])
-            if dest.exists():
-                src.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dest), str(src))
-                jf.write(
-                    json.dumps(
-                        {
-                            "ts": datetime.now(timezone.utc).isoformat(),
-                            "run_id": run_id,
-                            "src": rec["dest"],
-                            "dest": rec["src"],
-                            "sha256": rec["sha256"],
-                            "rule_id": rec["rule_id"],
-                            "action": "rollback",
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+            if not dest.exists():
+                skipped.append({"src": str(src), "reason": "dest_missing"})
+                continue
+            if src.exists():
+                # Never overwrite a newer file at the original path.
+                skipped.append(
+                    {
+                        "src": str(src),
+                        "dest": str(dest),
+                        "reason": "original_path_occupied",
+                    }
                 )
-                restored += 1
-    return {"run_id": run_id, "restored": restored}
+                continue
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest), str(src))
+            digest = rec.get("sha256")
+            if digest and seen.get(digest) == "done":
+                del seen[digest]
+            jf.write(
+                json.dumps(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "run_id": run_id,
+                        "src": rec["dest"],
+                        "dest": rec["src"],
+                        "sha256": rec.get("sha256", ""),
+                        "rule_id": rec.get("rule_id", ""),
+                        "action": "rollback",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            restored += 1
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "run_id": run_id,
+        "restored": restored,
+        "skipped": skipped,
+    }

@@ -2,7 +2,7 @@
 
 > 中文：规则优先 + 可选 LLM 分类的**文件入站引擎**——扫描、归类、受控搬移、journal 可回滚；全程支持 dry-run。
 
-**Rule-first file inbound engine** with optional LLM classification: scan → classify → controlled move → journaled, **rollback-capable**, **dry-run by default**. Engine has **zero third-party Python dependencies**.
+**Rule-first file inbound engine** with optional LLM classification: scan → classify → controlled move → journaled, **rollback-capable**, **dry-run by default** (`--execute` to move). Engine has **zero third-party Python dependencies**.
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
@@ -24,13 +24,14 @@ Uncertain matches go to `pending` for human or AI review — the engine never in
 
 | Capability | Behavior |
 |---|---|
-| Dry-run default | `--dry-run` (or omit execute path) reports `would_move` without touching disk |
+| Dry-run by default | Plain `python cli.py` only previews (`would_move`). **Moves require `--execute`.** |
 | Priority rules | First match by `priority` descending; catch-all `default-pending` required |
 | Dest whitelist | Rule `destination` must exist in `zones.dest_roots` or the rule raises |
-| SHA-256 state | `state/seen_hashes.json` skips already-processed files |
+| SHA-256 state | `state/seen_hashes.json` skips already-processed files (dirs auto-created) |
 | Journal | `runs/<id>/journal.ndjson` records `move` / `to_pending` |
-| Rollback | `--rollback <run_id>` restores files from the journal |
-| Optional LLM | `--ai` drains `pending` via `FF_LLM_CMD` / `llm_classify.py` (OpenAI-compatible) |
+| Rollback | `--rollback <run_id>` restores files; **refuses to overwrite** an existing file at the original path; clears restored hashes from `seen` |
+| Exempt dirs | Path segments in `zones.exempt_dirs` (e.g. `AppData`) are skipped during recursive scan |
+| Optional LLM | `--ai` drains `pending` via `FF_LLM_CMD` / `llm_classify.py`; AI moves get their own journal (`runs/<ai_run_id>/`) |
 | Exemptions | Lock files (`~$`), shortcuts (`.lnk`), OS junk prefixes/dirs |
 
 ## Quick start
@@ -39,25 +40,26 @@ Uncertain matches go to `pending` for human or AI review — the engine never in
 # 1) Layout (example paths — edit zones.json for your machine)
 mkdir -p data/{downloads,desktop,inbox,projects,training,knowledge,capture,pending,archive,scratch,runs}
 
-# 2) Dry-run against configured zones
-python cli.py --dry-run
-
-# 3) Single pass (writes + journal)
+# 2) Dry-run (default — no files move)
 python cli.py
+
+# 3) Single pass (writes + journal) — explicit opt-in
+python cli.py --execute
 
 # 4) Optional: AI drain of pending/
 #    cp secrets.env.example secrets.env   # fill values (gitignored)
-python cli.py --ai
+python cli.py --execute --ai
 
-# 5) Rollback a previous run
+# 5) Rollback a previous run (engine run_id or AI run_id from the JSON report)
 python cli.py --rollback <run_id>
 ```
 
 PowerShell helper:
 
 ```powershell
-.\runner.ps1 -DryRun
-.\runner.ps1 -AI
+.\runner.ps1              # dry-run (default)
+.\runner.ps1 -Execute     # actually move
+.\runner.ps1 -Execute -AI
 .\runner.ps1 -Rollback <run_id>
 ```
 
@@ -116,7 +118,13 @@ tests/            # unittest suite (no network)
 
 - Destinations outside `dest_roots` are rejected (rules raise; AI results ignored unless `confidence ≥ 0.8` **and** key is whitelisted).
 - AI failures never block the rule engine — files stay in `pending`.
-- This tool only **moves files you already own** on the local machine; it does not upload or exfiltrate.
+- **Default is dry-run.** Only `--execute` moves files on disk.
+- Rollback **never overwrites** a file that already exists at the original path (it reports `original_path_occupied` and skips).
+- This tool only **moves files you already own** on the local machine.
+
+### Privacy when `--ai` is enabled
+
+The AI path sends **file names, full paths, sizes, and destination keys** to the LLM endpoint you configure (`FF_LLM_BASE_URL` / `FF_LLM_CMD`). It does **not** upload file contents — but names and paths can still be sensitive. Do not enable `--ai` against an untrusted endpoint.
 
 ## Testing
 

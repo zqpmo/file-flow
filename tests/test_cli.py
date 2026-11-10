@@ -62,6 +62,7 @@ class CliTests(unittest.TestCase):
             )
             buf = io.StringIO()
             with redirect_stdout(buf):
+                # Default is dry-run — no --execute needed
                 code = cli.main(
                     [
                         "--ff-root",
@@ -70,11 +71,14 @@ class CliTests(unittest.TestCase):
                         str(zones_p),
                         "--rules",
                         str(rules_p),
-                        "--dry-run",
                     ]
                 )
             self.assertEqual(code, 0)
-            self.assertIn("would_move", buf.getvalue())
+            out = buf.getvalue()
+            self.assertIn("would_move", out)
+            self.assertIn('"dry_run": true', out)
+            # file must not have moved
+            self.assertTrue((src / "HANDBOOK_z.md").exists())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

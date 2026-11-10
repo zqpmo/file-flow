@@ -1,5 +1,4 @@
-runs/*/
-runs/latest-report.json
+runs/
 state/
 secrets.env
 __pycache__/

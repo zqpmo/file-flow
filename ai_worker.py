@@ -80,7 +80,13 @@ def drain_pending(
     if not pending_dir.is_dir():
         return {"moved": 0, "unresolved": 0, "considered": 0}
     files = sorted([p for p in pending_dir.iterdir() if p.is_file()])[:limit]
+    moved = unresolved = 0
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-ai"
     decisions_log = ff_root / "runs" / "ai-decisions.jsonl"
+    # Separate journal so AI moves are rollback-able via --rollback <ai_run_id>
+    ai_journal_dir = ff_root / "runs" / run_id
+    ai_journal_dir.mkdir(parents=True, exist_ok=True)
+    ai_journal = ai_journal_dir / "journal.ndjson"
     decisions_log.parent.mkdir(parents=True, exist_ok=True)
     moved = unresolved = 0
     if not files:
@@ -105,8 +111,9 @@ def drain_pending(
     by_name = {
         r.get("name") or Path(str(r.get("path", ""))).name: r for r in results
     }
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-ai"
-    with open(decisions_log, "a", encoding="utf-8") as logf:
+    with open(decisions_log, "a", encoding="utf-8") as logf, open(
+        ai_journal, "a", encoding="utf-8"
+    ) as jf:
         for src in files:
             r = by_name.get(src.name) or {}
             dest_key = r.get("dest_key")
@@ -115,6 +122,7 @@ def drain_pending(
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "run_id": run_id,
                 "file": src.name,
+                "src": str(src),
                 "dest_key": dest_key,
                 "confidence": conf,
                 "reason": r.get("reason", ""),
@@ -122,9 +130,13 @@ def drain_pending(
             if dest_key in dest_roots and conf >= 0.8:
                 final = engine._unique_dest(dest_roots[dest_key] / src.name)
                 final.parent.mkdir(parents=True, exist_ok=True)
+                digest = engine._sha256(src)
                 shutil.move(str(src), str(final))
                 rec["action"] = "move"
                 rec["dest"] = str(final)
+                rec["sha256"] = digest
+                rec["rule_id"] = "ai:" + str(dest_key)
+                jf.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 moved += 1
             else:
                 rec["action"] = "unresolved"
@@ -135,6 +147,7 @@ def drain_pending(
         "unresolved": unresolved,
         "considered": len(files),
         "run_id": run_id,
+        "journal": str(ai_journal),
     }
 
 
