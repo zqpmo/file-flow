@@ -24,13 +24,14 @@ Uncertain matches go to `pending` for human or AI review — the engine never in
 
 | Capability | Behavior |
 |---|---|
-| Dry-run by default | Plain `python cli.py` only previews (`would_move`). **Moves require `--execute`.** |
+| Dry-run by default | Plain `python cli.py` only previews (`would_move`). **Moves require `--execute`.** Still creates `state/` and writes `runs/latest-report.json` (metadata only — no source files move). |
 | Priority rules | First match by `priority` descending; catch-all `default-pending` required |
-| Dest whitelist | Rule `destination` must exist in `zones.dest_roots` or the rule raises |
+| Dest whitelist | Rule `destination` must exist in `zones.dest_roots`; optional `subfolder` is **resolved and must stay under that root** (`../` escape is rejected) |
 | SHA-256 state | `state/seen_hashes.json` skips already-processed files (dirs auto-created) |
 | Journal | `runs/<id>/journal.ndjson` records `move` / `to_pending` |
-| Rollback | `--rollback <run_id>` restores files; **refuses to overwrite** an existing file at the original path; clears restored hashes from `seen` |
-| Exempt dirs | Path segments in `zones.exempt_dirs` (e.g. `AppData`) are skipped during recursive scan |
+| Rollback | **Always a real file operation** (not gated by dry-run). Restores only if: not already rolled back, original path free, and dest SHA-256 still matches the journal. Clears restored hashes from `seen`. |
+| Partial failure | Report uses **actual success counts** (`moved`, `move_failed`, `pending_failed`, `partial`) — not planned counts |
+| Exempt dirs | Path segments under the scan root in `zones.exempt_dirs` (e.g. `AppData`) are skipped |
 | Optional LLM | `--ai` drains `pending` via `FF_LLM_CMD` / `llm_classify.py`; AI moves get their own journal (`runs/<ai_run_id>/`) |
 | Exemptions | Lock files (`~$`), shortcuts (`.lnk`), OS junk prefixes/dirs |
 
@@ -50,17 +51,19 @@ python cli.py --execute
 #    cp secrets.env.example secrets.env   # fill values (gitignored)
 python cli.py --execute --ai
 
-# 5) Rollback a previous run (engine run_id or AI run_id from the JSON report)
-python cli.py --rollback <run_id>
+# 5) Rollback a previous run — ALWAYS moves files back (not a preview)
+#    Order when AI was used: roll back the AI run_id first, then the original inbound run_id.
+python cli.py --rollback <ai_run_id>
+python cli.py --rollback <inbound_run_id>
 ```
 
 PowerShell helper:
 
 ```powershell
-.\runner.ps1              # dry-run (default)
+.\runner.ps1              # dry-run (default; writes state/ + latest-report only)
 .\runner.ps1 -Execute     # actually move
 .\runner.ps1 -Execute -AI
-.\runner.ps1 -Rollback <run_id>
+.\runner.ps1 -Rollback <run_id>   # real restore, not dry-run
 ```
 
 ## Configuration
@@ -116,10 +119,11 @@ tests/            # unittest suite (no network)
 
 ### Safety boundaries
 
-- Destinations outside `dest_roots` are rejected (rules raise; AI results ignored unless `confidence ≥ 0.8` **and** key is whitelisted).
+- Destinations outside `dest_roots` are rejected (rules raise; AI results ignored unless `confidence ≥ 0.8` **and** key is whitelisted). Rule `subfolder` is also constrained to stay under its dest root after path resolution.
 - AI failures never block the rule engine — files stay in `pending`.
-- **Default is dry-run.** Only `--execute` moves files on disk.
-- Rollback **never overwrites** a file that already exists at the original path (it reports `original_path_occupied` and skips).
+- **Default is dry-run** for scan/move: only `--execute` moves source files. Dry-run may still create `state/` and write `runs/latest-report.json` (no business file moves).
+- **`--rollback` is always a real operation** — it does not honor dry-run. It will not overwrite an occupied original path, will not re-apply an already-rolled-back journal entry, and will not pull back a dest file whose SHA-256 no longer matches the journal.
+- Report fields `moved` / `move_failed` / `partial` reflect **actual outcomes**, not planned move count.
 - This tool only **moves files you already own** on the local machine.
 
 ### Privacy when `--ai` is enabled
@@ -132,7 +136,7 @@ The AI path sends **file names, full paths, sizes, and destination keys** to the
 python -m unittest discover -s tests -v
 ```
 
-Covers: rule priority, lockfile ignore, dry-run no-move, journal + rollback, AI whitelist rejection, low-confidence stays pending.
+Covers: rule priority, lockfile ignore, dry-run no-move, journal + rollback (occupied path / double-rollback / hash mismatch), exempt dirs, subfolder escape, first-run state dir, AI whitelist rejection, low-confidence stays pending, partial-failure counts.
 
 ## License
 

@@ -103,6 +103,22 @@ def _unique_dest(dest: Path) -> Path:
     raise RuntimeError(f"cannot uniquify dest: {dest}")
 
 
+def _safe_join_dest(dest_root: Path, sub: str) -> Path:
+    """Join subfolder under dest_root; reject path escape (e.g. ../outside)."""
+    root = Path(dest_root)
+    if not sub:
+        return root
+    candidate = (root / sub).resolve()
+    root_res = root.resolve()
+    try:
+        candidate.relative_to(root_res)
+    except ValueError as e:
+        raise ValueError(
+            f"subfolder escapes destination root: sub={sub!r} root={root_res}"
+        ) from e
+    return candidate
+
+
 def _iter_sources(zones: dict, source_filter: list[str] | None, extra_sources: list[str] | None):
     for key, uri in (zones.get("sources") or {}).items():
         if source_filter and key not in source_filter:
@@ -157,6 +173,7 @@ def run_once(
     moves: list[dict] = []
     pending: list[dict] = []
     ignored: list[dict] = []
+    skipped_plan: list[dict] = []
     dest_roots = {k: Path(v) for k, v in zones["dest_roots"].items()}
 
     for zone_key, zone_path in _iter_sources(zones, source_filter, extra_sources):
@@ -184,9 +201,18 @@ def run_once(
                 seen[digest] = "ignored"
                 continue
             if verdict["decision"] == "auto":
-                target_dir = dest_roots[dest_key]
-                if sub:
-                    target_dir = target_dir / sub
+                try:
+                    target_dir = _safe_join_dest(dest_roots[dest_key], sub)
+                except ValueError as ex:
+                    skipped_plan.append(
+                        {
+                            "src": str(src),
+                            "dest_key": dest_key,
+                            "rule_id": verdict["rule_id"],
+                            "error": str(ex),
+                        }
+                    )
+                    continue
                 moves.append(
                     {
                         "src": str(src),
@@ -201,11 +227,17 @@ def run_once(
                 # pending：物理落入 inbox-pending 队列，建议 dest 仅记录
                 pending_dir = dest_roots.get("pending")
                 queue_dest = (pending_dir / src.name) if pending_dir else (dest_roots[dest_key] / src.name)
+                suggested = str(dest_roots[dest_key] / src.name)
+                if sub:
+                    try:
+                        suggested = str(_safe_join_dest(dest_roots[dest_key], sub) / src.name)
+                    except ValueError:
+                        suggested = str(dest_roots[dest_key] / src.name)
                 pending.append(
                     {
                         "src": str(src),
                         "dest": str(queue_dest),
-                        "suggested_dest": str(dest_roots[dest_key] / src.name),
+                        "suggested_dest": suggested,
                         "dest_key": dest_key,
                         "rule_id": verdict["rule_id"],
                         "confidence": verdict["confidence"],
@@ -213,9 +245,11 @@ def run_once(
                     }
                 )
 
+    moved_ok = pending_ok = 0
+    move_failed = pending_failed = 0
     if not dry_run:
         run_dir.mkdir(parents=True, exist_ok=True)
-        skipped: list[dict] = []
+        skipped: list[dict] = list(skipped_plan)
         with open(journal_path, "a", encoding="utf-8") as jf:
             for e in moves:
                 try:
@@ -224,6 +258,7 @@ def run_once(
                     shutil.move(e["src"], final)
                 except OSError as ex:
                     skipped.append({"src": e["src"], "error": str(ex)})
+                    move_failed += 1
                     continue
                 rec = {
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -236,6 +271,7 @@ def run_once(
                 }
                 jf.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 seen[rec["sha256"]] = "done"
+                moved_ok += 1
             for e in pending:
                 try:
                     final = _unique_dest(Path(e["dest"]))
@@ -243,6 +279,7 @@ def run_once(
                     shutil.move(e["src"], final)
                 except OSError as ex:
                     skipped.append({"src": e["src"], "error": str(ex)})
+                    pending_failed += 1
                     continue
                 e["dest"] = str(final)
                 rec = {
@@ -255,6 +292,8 @@ def run_once(
                     "action": "to_pending",
                 }
                 jf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                seen[rec["sha256"]] = "done"
+                pending_ok += 1
         state_path.write_text(
             json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -267,12 +306,23 @@ def run_once(
         "run_id": run_id,
         "dry_run": dry_run,
         "ts": datetime.now(timezone.utc).isoformat(),
-        "moved": 0 if dry_run else len(moves),
+        "moved": 0 if dry_run else moved_ok,
         "would_move": len(moves),
-        "pending_ai": len(pending),
+        "move_failed": 0 if dry_run else move_failed,
+        "pending_ai": len(pending) if dry_run else pending_ok,
+        "pending_failed": 0 if dry_run else pending_failed,
+        "partial": bool(
+            not dry_run
+            and (
+                move_failed
+                or pending_failed
+                or len(skipped_plan) > 0
+            )
+        ),
         "ignored": len(ignored),
         "moves": moves,
         "pending": pending,
+        "skipped_plan": skipped_plan,
     }
     if not dry_run:
         report_path.write_text(
@@ -293,15 +343,28 @@ def rollback_run(ff_root: Path, run_id: str) -> dict:
     skipped: list[dict] = []
     text = journal_path.read_text(encoding="utf-8")
     lines = [json.loads(x) for x in text.splitlines() if x.strip()]
+    # Idempotency: pairs already restored in this journal must not run again.
+    already: set[tuple[str, str]] = set()
+    for r in lines:
+        if r.get("action") == "rollback":
+            # rollback record stores original dest in "src" and original src in "dest"
+            already.add((str(r.get("dest", "")), str(r.get("src", ""))))
     state_path = ff_root / "state" / "seen_hashes.json"
     seen: dict = {}
     if state_path.exists():
         seen = json.loads(state_path.read_text(encoding="utf-8"))
     with open(journal_path, "a", encoding="utf-8") as jf:
+        # LIFO: restore later moves first (safer for nested destinations)
         for rec in reversed(lines):
             if rec.get("action") not in ("move", "to_pending"):
                 continue
             dest, src = Path(rec["dest"]), Path(rec["src"])
+            key = (str(src), str(dest))
+            if key in already:
+                skipped.append(
+                    {"src": str(src), "dest": str(dest), "reason": "already_rolled_back"}
+                )
+                continue
             if not dest.exists():
                 skipped.append({"src": str(src), "reason": "dest_missing"})
                 continue
@@ -315,6 +378,21 @@ def rollback_run(ff_root: Path, run_id: str) -> dict:
                     }
                 )
                 continue
+            expected = rec.get("sha256") or ""
+            if expected:
+                actual = _sha256(dest)
+                if actual != expected:
+                    # Destination content changed since the move — do not pull it back.
+                    skipped.append(
+                        {
+                            "src": str(src),
+                            "dest": str(dest),
+                            "reason": "dest_hash_mismatch",
+                            "expected_sha256": expected,
+                            "actual_sha256": actual,
+                        }
+                    )
+                    continue
             src.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(dest), str(src))
             digest = rec.get("sha256")
@@ -335,6 +413,7 @@ def rollback_run(ff_root: Path, run_id: str) -> dict:
                 )
                 + "\n"
             )
+            already.add(key)
             restored += 1
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(seen, ensure_ascii=False, indent=2), encoding="utf-8")

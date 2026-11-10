@@ -174,6 +174,132 @@ class MoveJournalTests(unittest.TestCase):
         self.assertTrue((exempt_root / "hidden.md").exists())
         self.assertFalse((self.src / "HANDBOOK_visible.md").exists())
 
+    def test_double_rollback_does_not_steal_new_file(self):
+        f = self.src / "HANDBOOK_dup.md"
+        f.write_text("original-content", encoding="utf-8")
+        report = engine.run_once(
+            self.ff,
+            zones_path=self.zones_path,
+            rules_path=self.rules_path,
+            dry_run=False,
+            source_filter=None,
+            extra_sources=[str(self.src)],
+        )
+        self.assertEqual(report["moved"], 1)
+        dest = Path(self.zones["dest_roots"]["knowledge"]) / "HANDBOOK_dup.md"
+        self.assertTrue(dest.exists())
+
+        # First rollback restores original
+        r1 = engine.rollback_run(self.ff, report["run_id"])
+        self.assertEqual(r1["restored"], 1)
+        self.assertTrue(f.exists())
+
+        # Simulate: original path cleared; a DIFFERENT file appears at dest path
+        f.unlink()
+        dest.write_text("unrelated-later-file", encoding="utf-8")
+
+        r2 = engine.rollback_run(self.ff, report["run_id"])
+        self.assertEqual(r2["restored"], 0)
+        reasons = {s.get("reason") for s in r2.get("skipped", [])}
+        # either already_rolled_back (journal marker) or dest_hash_mismatch
+        self.assertTrue(
+            reasons & {"already_rolled_back", "dest_hash_mismatch"},
+            f"expected skip reasons, got {reasons}",
+        )
+        # The unrelated file must remain at dest, not be yanked to src
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.read_text(encoding="utf-8"), "unrelated-later-file")
+        self.assertFalse(f.exists())
+
+    def test_subfolder_escape_rejected(self):
+        f = self.src / "HANDBOOK_esc.md"
+        f.write_text("esc", encoding="utf-8")
+        rules = [
+            {
+                "id": "bad-sub",
+                "priority": 10,
+                "match": {"name_any": ["HANDBOOK"]},
+                "destination": "knowledge",
+                "subfolder": "../outside",
+                "confidence": 0.9,
+            },
+            {
+                "id": "default",
+                "priority": 0,
+                "match": {},
+                "destination": "pending",
+                "confidence": 0.3,
+            },
+        ]
+        rules_path = self.ff / "rules_esc.json"
+        rules_path.write_text(json.dumps(rules, ensure_ascii=False), encoding="utf-8")
+        outside = self.tmp / "outside"
+        report = engine.run_once(
+            self.ff,
+            zones_path=self.zones_path,
+            rules_path=rules_path,
+            dry_run=False,
+            source_filter=None,
+            extra_sources=[str(self.src)],
+        )
+        # escape rejected at plan time → not moved to outside; file may stay or go pending
+        self.assertFalse((outside / "HANDBOOK_esc.md").exists())
+        self.assertFalse((self.tmp / "outside" / "HANDBOOK_esc.md").exists())
+        # dest root must not receive via ../either
+        kb = Path(self.zones["dest_roots"]["knowledge"]).parent / "outside"
+        self.assertFalse((kb / "HANDBOOK_esc.md").exists())
+        # file should not have escaped; either still in src or moved to pending queue only
+        escaped = any(
+            "outside" in str(p)
+            for p in [self.src / "HANDBOOK_esc.md", Path(self.zones["dest_roots"]["pending"]) / "HANDBOOK_esc.md"]
+            if p.exists() and "outside" in str(p.resolve())
+        )
+        # Hard assertion: nothing under tmp/outside
+        self.assertFalse(any(self.tmp.glob("outside/**/*")))
+        # And src or pending still has it (not lost outside whitelist)
+        self.assertTrue(
+            (self.src / "HANDBOOK_esc.md").exists()
+            or (Path(self.zones["dest_roots"]["pending"]) / "HANDBOOK_esc.md").exists()
+            or report["moved"] == 0
+        )
+
+    def test_partial_failure_reports_actual_moved(self):
+        # Two sources: one valid file, one path that will fail on move (dest is a file)
+        ok = self.src / "HANDBOOK_ok.md"
+        ok.write_text("ok", encoding="utf-8")
+        # Make knowledge dest a FILE so mkdir/move of handbook under knowledge fails?
+        # Easier: pre-create dest as file so _unique_dest target parent is a file
+        kb = Path(self.zones["dest_roots"]["knowledge"])
+        # Use a second file whose dest parent becomes invalid: replace knowledge root with a file
+        # Actually simpler approach: one auto move succeeds; inject failure by making dest path a directory-as-file conflict
+        # Create knowledge as existing FILE (not dir)
+        if kb.exists() and kb.is_dir():
+            shutil.rmtree(kb)
+        # leave knowledge missing so mkdir works for first file...
+        # Instead: two files, second has dest that is blocked by making pending a file for default rule
+        # Cleanest: only count successes — plant one file that moves, and one whose src disappears mid-loop is hard.
+        # Use dest_key knowledge: first file creates dir; we simulate failure by chmod?
+        # On Windows easiest partial: two files with same planned dest dir, but make dest root a file after first?
+        # Simpler unit-level: two auto files, knowledge root is a FILE → both fail → moved=0, move_failed=2
+        kb.write_text("not-a-dir", encoding="utf-8")
+        f2 = self.src / "HANDBOOK_ok2.md"
+        f2.write_text("ok2", encoding="utf-8")
+        report = engine.run_once(
+            self.ff,
+            zones_path=self.zones_path,
+            rules_path=self.rules_path,
+            dry_run=False,
+            source_filter=None,
+            extra_sources=[str(self.src)],
+        )
+        # both handbook files planned; both should fail (dest root is a file)
+        self.assertEqual(report["would_move"], 2)
+        self.assertEqual(report["moved"], 0)
+        self.assertEqual(report["move_failed"], 2)
+        self.assertTrue(report["partial"])
+        self.assertTrue(ok.exists())
+        self.assertTrue(f2.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
